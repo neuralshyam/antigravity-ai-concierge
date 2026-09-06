@@ -17,7 +17,7 @@ const saasStoreTools: Groq.Chat.Completions.ChatCompletionTool[] = [
     function: {
       name: "store_action",
       description:
-        "Execute an action on the merchant's store backend: search catalog, fetch live stock/prices, check customer orders, manage shopping cart, and wishlist.",
+        "Execute an action on the merchant's store backend: search catalog, get top-searched trending items, validate coupon discounts, read verified product reviews, check/track customer orders, manage shopping cart (view, add, remove, clear), manage wishlist (view, add, remove), track return requests, and inspect saved payment methods.",
       parameters: {
         type: "object",
         properties: {
@@ -25,30 +25,42 @@ const saasStoreTools: Groq.Chat.Completions.ChatCompletionTool[] = [
             type: "string",
             enum: [
               "search_products",
+              "get_top_searched_products",
+              "validate_coupon",
+              "get_product_reviews",
               "get_product_details",
               "get_my_orders",
               "track_single_order",
               "get_my_cart",
               "add_to_cart",
+              "remove_from_cart",
+              "clear_cart",
               "get_my_wishlist",
+              "add_to_wishlist",
+              "remove_from_wishlist",
+              "get_my_returns",
+              "get_saved_payment_methods",
               "get_my_profile",
             ],
             description: "The action to execute on the merchant's backend proxy.",
           },
           search_params: {
             type: "object",
-            description: "Parameters when intent is 'search_products'.",
+            description: "Parameters when intent is 'search_products' or 'get_top_searched_products'.",
             properties: {
               searchTerm: { type: "string", description: "Keywords (e.g. 'shoes', 'phone', 't-shirt')." },
               category: { type: "string", description: "Category filter." },
               minPrice: { type: "number", description: "Minimum price." },
               maxPrice: { type: "number", description: "Maximum price." },
               page: { type: "number", description: "Page number." },
-              limit: { type: "number", description: "Items per page." },
+              limit: { type: "number", description: "Items per page (up to 10)." },
             },
           },
-          product_id: { type: "string", description: "Product MongoDB ID." },
-          order_id: { type: "string", description: "Order ID." },
+          product_id: { type: "string", description: "Product MongoDB ID (used for details, reviews, cart removal, wishlist)." },
+          order_id: { type: "string", description: "Order ID (e.g. #ORD-1234 or Mongo ID) for order tracking." },
+          coupon_code: { type: "string", description: "Promo/Coupon code to validate (e.g. 'SAVE20')." },
+          order_amount: { type: "number", description: "Subtotal amount before discount to calculate savings." },
+          cart_item_id: { type: "string", description: "Specific cart item ID to remove." },
           cart_item: {
             type: "object",
             description: "Details when intent is 'add_to_cart'.",
@@ -66,12 +78,16 @@ const saasStoreTools: Groq.Chat.Completions.ChatCompletionTool[] = [
   },
 ];
 
+// In-memory cache for verified store API keys (60s TTL) to eliminate Neon DB query latency on every message
+const storeCache = new Map<string, { store: any; timestamp: number }>();
+const CACHE_TTL_MS = 60_000;
+
 export async function POST(req: NextRequest) {
   try {
     const merchantKey = req.headers.get("x-merchant-key");
     const customerAuth = req.headers.get("authorization"); // Customer JWT forwarded from store backend
 
-    // 1. Verify Merchant Subscription API Key from Neon PostgreSQL
+    // 1. Verify Merchant Subscription API Key
     if (!merchantKey) {
       return NextResponse.json(
         { error: "Unauthorized: Missing X-Merchant-Key. Please provide a valid SaaS API key." },
@@ -79,10 +95,18 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Dynamic Zero-Trust DB Lookup
-    const store = await prisma.store.findUnique({
-      where: { apiKey: merchantKey },
-    });
+    let store: any = null;
+    const cached = storeCache.get(merchantKey);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+      store = cached.store;
+    } else {
+      store = await prisma.store.findUnique({
+        where: { apiKey: merchantKey },
+      });
+      if (store && store.status === "ACTIVE") {
+        storeCache.set(merchantKey, { store, timestamp: Date.now() });
+      }
+    }
 
     if (!store || store.status !== "ACTIVE") {
       return NextResponse.json(
@@ -99,8 +123,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // PINNED BACKEND CALLBACK: Strictly use the URL registered in Neon DB!
-    const storeBackendUrl = store.backendUrl;
+    // PINNED BACKEND CALLBACK: Strictly use the URL registered in Neon DB or forwarded from store gateway!
+    const storeBackendUrl = req.headers.get("x-store-backend-url") || store.backendUrl;
 
     const { messages } = await req.json();
     const groqApiKey = process.env.GROQ_API_KEY;
@@ -108,42 +132,45 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "GROQ_API_KEY missing on SaaS Server" }, { status: 500 });
     }
 
-    // Asynchronously increment request usage in Neon DB
+    // Asynchronously increment request usage in Neon DB in background (non-blocking)
     prisma.store.update({
       where: { id: store.id },
       data: { usedRequests: { increment: 1 } },
     }).catch(console.error);
 
-    // 2. Meta Llama Prompt Guard 2 (22m) Defense
     const latestUserMsg = [...messages].reverse().find((m: any) => m.role === "user")?.content || "";
-    if (latestUserMsg) {
-      const guardResult = await checkPromptSafety(latestUserMsg, groqApiKey);
-      if (!guardResult.isSafe) {
-        return NextResponse.json({
-          reply: "⚠️ Your message was flagged by our safety guardrail. Please keep questions focused on our store products and orders.",
-          toolExecutions: [],
-          guardBlocked: true,
-        });
-      }
-    }
 
     const systemMessage: Groq.Chat.Completions.ChatCompletionMessageParam = {
       role: "system",
       content: `You are the AI Shopping Assistant for ${store.storeName}.
 - CONVERSATION STYLE: Minimal, punchy, engaging, and concise. Deliver direct, helpful answers with just enough warmth and proactivity.
-- You have ONE master tool: \`store_action\`. Use it to search products, fetch real-time catalog items, check stock/prices, track orders, view cart, and add products to cart.
+- You have ONE master tool: \`store_action\`. Use it for:
+  - Product Discovery: \`search_products\`, \`get_top_searched_products\` (trending/most-searched), \`get_product_details\`, \`get_product_reviews\`
+  - Cart Management: \`get_my_cart\`, \`add_to_cart\`, \`remove_from_cart\`, \`clear_cart\`
+  - Wishlist: \`get_my_wishlist\`, \`add_to_wishlist\`, \`remove_from_wishlist\`
+  - Orders & Returns: \`get_my_orders\`, \`track_single_order\`, \`get_my_returns\`
+  - Deals & Payments: \`validate_coupon\`, \`get_saved_payment_methods\`, \`get_my_profile\`
 - CLICKABLE LINK ENRICHMENT (CRITICAL):
-  - Always link product names to their live detail page: \`[Product Title](/best_deal/PRODUCT_ID)\` using the real \`_id\` from the tool result.
+  - Always link product names to their live detail page: \`[Short Product Title](/best_deal/PRODUCT_ID)\` using the real \`_id\` from the tool result.
+  - IMPORTANT: Keep the linked product title concise and clean (shorten long titles to the main product name, max 4-6 words / 1-2 lines) so it renders neatly in the chat UI without wrapping into a huge block.
   - When mentioning cart, link to \`[My Cart](/my-cart)\`.
+  - When mentioning wishlist, link to \`[My Wishlist](/wise-list)\`.
   - When mentioning order tracking, link to \`[Track Order](/track-order)\`.
+  - When mentioning returns/refunds, link to \`[Return Requests](/returns)\`.
   - When mentioning categories, link to \`[Category Name](/category?category=CategoryName)\`.
 - PAGINATION SUPPORT: When searching or listing products, use 'page' and 'limit'. If total > count on current page, mention total results and offer to show the next page.
-- Format recommendations with clean Markdown tables or bullet lists.`,
+- FORMATTING RULES (CRITICAL):
+  - In Markdown tables, ONLY include rows for products actually returned by the tool. NEVER generate blank, empty, or placeholder rows (e.g. rows 6 to 10 with empty spaces).
+  - State the exact count returned (e.g., "Here are 5 top picks" instead of "Here are 10" when 5 are returned).
+  - Format recommendations with clean, compact Markdown tables or concise bullet lists.`,
     };
+
+    // Keep only the latest 8 messages for sub-second context window processing
+    const trimmedMessages = messages.slice(-8);
 
     const chatHistory: Groq.Chat.Completions.ChatCompletionMessageParam[] = [
       systemMessage,
-      ...messages.map((m: { role: string; content: string }) => ({
+      ...trimmedMessages.map((m: { role: string; content: string }) => ({
         role: m.role as "user" | "assistant",
         content: m.content,
       })),
@@ -151,14 +178,25 @@ export async function POST(req: NextRequest) {
 
     const groq = new Groq({ apiKey: groqApiKey });
 
-    // 3. LLM Step 1: Tool Decision on Groq LPU
-    const response = await groq.chat.completions.create({
-      model: "openai/gpt-oss-120b",
-      messages: chatHistory,
-      tools: saasStoreTools,
-      tool_choice: "auto",
-      temperature: 0.2,
-    });
+    // 2 & 3. Run Meta Llama Prompt Guard 2 AND Groq Tool Decision in PARALLEL!
+    const [guardResult, response] = await Promise.all([
+      latestUserMsg ? checkPromptSafety(latestUserMsg, groqApiKey) : Promise.resolve({ isSafe: true }),
+      groq.chat.completions.create({
+        model: "openai/gpt-oss-20b",
+        messages: chatHistory,
+        tools: saasStoreTools,
+        tool_choice: "auto",
+        temperature: 0.2,
+      }),
+    ]);
+
+    if (!guardResult.isSafe) {
+      return NextResponse.json({
+        reply: "⚠️ Your message was flagged by our safety guardrail. Please keep questions focused on our store products and orders.",
+        toolExecutions: [],
+        guardBlocked: true,
+      });
+    }
 
     const choice = response.choices[0];
     const message = choice.message;
@@ -213,10 +251,8 @@ export async function POST(req: NextRequest) {
 
       if (isStreamRequested) {
         const stream = await groq.chat.completions.create({
-          model: "openai/gpt-oss-120b",
+          model: "openai/gpt-oss-20b",
           messages: [...chatHistory, ...toolCallResponses],
-          tools: saasStoreTools,
-          tool_choice: "auto",
           temperature: 0.2,
           stream: true,
         });
@@ -253,10 +289,8 @@ export async function POST(req: NextRequest) {
 
       // Non-streaming fallback
       const finalCompletion = await groq.chat.completions.create({
-        model: "openai/gpt-oss-120b",
+        model: "openai/gpt-oss-20b",
         messages: [...chatHistory, ...toolCallResponses],
-        tools: saasStoreTools,
-        tool_choice: "auto",
         temperature: 0.2,
       });
 

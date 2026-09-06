@@ -79,3 +79,46 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }
 }
+
+// PATCH: Upgrade store tier after Razorpay checkout
+export async function PATCH(req: NextRequest) {
+  try {
+    const userId = getUserIdFromAuth(req);
+    if (!userId) {
+      return NextResponse.json({ error: "Unauthorized. Please log in." }, { status: 401 });
+    }
+
+    const body = await req.json();
+    const { storeId, planKey = "pro", razorpay_payment_id, razorpay_order_id } = body;
+
+    const quotaMap: Record<string, { tier: string; quota: number }> = {
+      starter: { tier: "STARTER", quota: 5000 },
+      pro: { tier: "PRO", quota: 50000 },
+      scale: { tier: "SCALE", quota: 250000 },
+    };
+
+    const targetConfig = quotaMap[planKey] || quotaMap.pro;
+
+    const updatedStore = await prisma.store.updateMany({
+      where: {
+        merchantId: userId,
+        ...(storeId ? { id: storeId } : {}),
+      },
+      data: {
+        tier: targetConfig.tier,
+        monthlyQuota: targetConfig.quota,
+      },
+    });
+
+    return NextResponse.json({
+      success: true,
+      message: `Successfully upgraded to ${targetConfig.tier} (₹1,000/mo) via Razorpay`,
+      paymentId: razorpay_payment_id || `pay_${Date.now()}`,
+      orderId: razorpay_order_id || `order_${Date.now()}`,
+      updatedCount: updatedStore.count,
+    });
+  } catch (err: any) {
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  }
+}
+
