@@ -1,0 +1,55 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Merchant {
+  id               String   @id @default(cuid())
+  email            String   @unique
+  passwordHash     String
+  name             String
+  companyName      String?
+  role             String   @default("MERCHANT")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  stores           Store[]
+}
+
+model Store {
+  id               String   @id @default(cuid())
+  merchantId       String
+  merchant         Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  
+  storeName        String
+  frontendUrl      String   // E.g. https://ebakx.com or http://localhost:3001
+  backendUrl       String   // E.g. http://127.0.0.1:5000/api/v1 (Pinned callback)
+  apiKey           String   @unique // ebakx_live_sk_...
+  
+  tier             String   @default("STARTER") // STARTER, PRO, ENTERPRISE
+  monthlyQuota     Int      @default(50000)
+  usedRequests     Int      @default(0)
+  status           String   @default("ACTIVE") // ACTIVE, PAUSED, SUSPENDED
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  
+  usageLogs        UsageLog[]
+}
+
+model UsageLog {
+  id               String   @id @default(cuid())
+  storeId          String
+  store            Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  
+  tokensUsed       Int      @default(0)
+  intent           String?
+  guardStatus      String   @default("PASSED") // PASSED, BLOCKED
+  latencyMs        Int      @default(0)
+  
+  createdAt        DateTime @default(now())
+}
