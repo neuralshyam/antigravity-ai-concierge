@@ -6,6 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "server": "bun run src/server.ts",
+    "compile": "mkdir -p bin && bun build --compile --target=bun src/server.ts --outfile bin/concierge-core",
     "lint": "eslint"
   },
   "dependencies": {

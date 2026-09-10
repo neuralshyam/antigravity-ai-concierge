@@ -1,10 +1,20 @@
-# Mayapur Commerce Concierge: Zero-Trust Scoped AI Agent
+# Antigravity AI Concierge: Multi-Tenant Zero-Trust E-Commerce SaaS
 
-An autonomous, sales-driving AI shopping assistant and customer concierge designed specifically for e-commerce stores. Built with **strict server-side execution**, **Zero-Trust customer JWT scoping**, **Meta Llama Prompt Guard 2 (22m)**, and high-speed **Groq LPU** inference.
+A high-performance, multi-tenant B2B SaaS platform built for external e-commerce stores, merchants, and enterprise brands ("outsiders"). It provides an autonomous, sales-driving AI shopping assistant and customer concierge with **zero-trust cryptographic isolation**, **per-store API key management**, **Meta Llama Prompt Guard 2 (22m)** jailbreak defense, and high-speed **Groq LPU** inference.
 
 ---
 
-## 🚀 The Core Philosophy: Why Scoped Proxy?
+## 🌐 Built as a Multi-Tenant SaaS for External Stores
+
+This platform is engineered from the ground up as a plug-and-play SaaS for external businesses:
+- **Commercial Multi-Tenancy:** External merchants sign up, register their domain/store backend endpoints, and generate isolated production API keys (`sk_live_...`).
+- **Zero Integration Hassle:** Merchants embed a lightweight chat widget or connect via REST/SSE streaming API without rewriting their existing store architecture.
+- **Fair Tiered Monetization:** Flat monthly SaaS pricing (₹1,000/mo) integrated with Razorpay checkout and webhook-driven subscription life-cycling.
+- **Strict Site-Key Isolation:** API keys are cryptographically bound to the merchant's registered origin URL to prevent unauthorized reuse or spoofing.
+
+---
+
+## 🚀 The Core Philosophy: Why Zero-Trust Scoped Proxy Sells to External Clients
 
 Most traditional e-commerce bots suffer from two massive problems:
 1. **Dumb Canned Responses:** They act like glorified FAQ bots that cannot check real live inventory, personalize recommendations, or track shipments.
@@ -140,9 +150,10 @@ Open **`http://localhost:3000`** in your browser.
 
 ---
 
-## 🤝 Integrating with a Real E-Commerce Store
+## 🤝 Onboarding External E-Commerce Clients (SaaS Integration)
 
-To plug this into a live store (e.g. your friend's custom Next.js/Shopify/WooCommerce store):
-1. Point `baseUrl` to their real store API base URL.
-2. Configure the widget on their storefront to forward the logged-in customer's session JWT in the `Authorization` header when calling `/api/bot/chat`.
-3. Map their catalog endpoints into the proxy dispatcher in [`src/lib/unified-tool.ts`](file:///home/shyam/ecommerce-ai-concierge/src/lib/unified-tool.ts).
+To onboard an external e-commerce merchant (Shopify, WooCommerce, Custom Next.js/React storefronts):
+1. **Sign Up & Register Site:** The client creates an account on the SaaS portal and registers their store's base API URL.
+2. **Obtain API Key:** Generate a store-scoped API key (`sk_live_...`).
+3. **Embed Widget / Call API:** The client integrates the chat widget or calls `/api/v1/chat` with their `x-api-key` header and optional customer session JWT in `Authorization`.
+4. **Subscription Management:** Automated billing at ₹1,000/mo via Razorpay ensures active access and API quotas.
